@@ -1,56 +1,50 @@
 // server.js
 const express = require('express');
-const { spawn } = require('child_process');
-const WebSocket = require('ws');
 const http = require('http');
-
-const CAMERA_RTSP_URL = 'rtsp://admin:admin@192.168.0.2:1935';
+const { Server } = require('socket.io');
+const cors = require('cors');
 
 const app = express();
+app.use(cors()); // Allow all origins for now (in production, restrict this)
+
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const io = new Server(server, {
+  cors: {
+    origin: "http://localhost:3000", // frontend origin
+    methods: ["GET", "POST"]
+  }
+});
 
-wss.on('connection', function connection(ws) {
-  console.log('Client connected');
+io.on('connection', (socket) => {
+  console.log(`Socket connected: ${socket.id}`);
 
-  const ffmpeg = spawn('ffmpeg', [
-    '-rtsp_transport', 'tcp',
-    '-i', CAMERA_RTSP_URL,
-    '-f', 'image2pipe',
-    '-qscale', '5',
-    '-vf', 'fps=10',
-    '-update', '1',
-    '-vcodec', 'mjpeg',
-    'pipe:1',
-  ]);
+  socket.on('join-room', ({ roomId, username }) => {
+    console.log(`${username} joined room: ${roomId}`);
+    socket.join(roomId);
 
-  ffmpeg.stdout.on('data', (chunk) => {
-    // Parse and send complete JPEG frames
-    const start = chunk.indexOf(Buffer.from([0xFF, 0xD8])); // JPEG start
-    const end = chunk.indexOf(Buffer.from([0xFF, 0xD9]));   // JPEG end
+    // Notify all other users in the room
+    socket.to(roomId).emit('user-joined', { id: socket.id });
 
-    if (start !== -1 && end !== -1 && end > start) {
-      const frame = chunk.slice(start, end + 2);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(frame);
-      }
-    }
-  });
+    // Handle signaling
+    socket.on('signal', ({ userToSignal, signal, from }) => {
+      io.to(userToSignal).emit('signal', { signal, from });
+    });
 
-  ffmpeg.stderr.on('data', (data) => {
-    console.error(`ffmpeg stderr: ${data}`);
-  });
+    // Handle disconnect
+    socket.on('disconnect', () => {
+      console.log(`Socket disconnected: ${socket.id}`);
+      socket.to(roomId).emit('user-left', { id: socket.id });
+    });
 
-  ffmpeg.on('close', () => {
-    console.log('FFmpeg closed');
-  });
+    // Handle leaving the room
+    socket.on("leave-room", ({ roomId }) => {
+      socket.leave(roomId);
+      socket.broadcast.to(roomId).emit("user-disconnected", { id: socket.id });
+    });
 
-  ws.on('close', () => {
-    console.log('WebSocket client disconnected');
-    ffmpeg.kill('SIGINT');
   });
 });
 
-server.listen(8080, () => {
-  console.log('Server running on http://localhost:8080');
+server.listen(3001, () => {
+  console.log('✅ Server running on http://localhost:3001');
 });
